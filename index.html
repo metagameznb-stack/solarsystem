@@ -370,6 +370,7 @@ BODIES.forEach(b=>{ if(b.isComet && b.tail) b.tail.p = []; });
 // Build a derived index of bodies (skip the composite 'sun' key helper).
 const bodies = BODIES.filter(b=>b.key!=="sun");
 const sunBody = BODIES.find(b=>b.key==="sun");
+sunBody.x = 0; sunBody.y = 0; sunBody.z = 0;   // sun sits at the world origin; drawSphere/comet code use it as a position vector
 const byKey = {}; BODIES.forEach(b=>byKey[b.key]=b);
 
 // Precompute a per-body display radius in world units (amplified, Sun reduced).
