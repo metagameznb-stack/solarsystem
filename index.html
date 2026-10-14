@@ -376,7 +376,7 @@ const byKey = {}; BODIES.forEach(b=>byKey[b.key]=b);
 // Precompute a per-body display radius in world units (amplified, Sun reduced).
 function displayRadius(b){
   let r = b.radius * radiusScale;
-  if(b.key==="sun") r *= 0.12;                 // keep Sun a manageable glowing disc
+  if(b.key==="sun") r *= 0.4;                  // sun ~29x Jupiter (real ratio), keep visible without swallowing the system
   b.renderR = r;
   return r;
 }
@@ -1013,7 +1013,7 @@ function setPlayBtn(){playBtn.textContent=VIEW.playing?"❚❚ Pause":"▶ Play"
 playBtn.onclick=()=>{VIEW.playing=!VIEW.playing;setPlayBtn();};
 
 const zoomEl=document.getElementById("zoom");
-zoomEl.addEventListener("input",()=>{cam.dist=+zoomEl.value*3.2;});
+zoomEl.addEventListener("input",()=>{cam.dist=+zoomEl.value*3.2;flyDist=null;});
 
 function toggle(id,key){
   const el=document.getElementById(id);
