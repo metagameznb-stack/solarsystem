@@ -165,7 +165,7 @@ function orb(a,e,i,Om,rov,Lbar,period){
 
 // renderScale maps a body's real radius (km) to world-units on screen.
 // Tuned so inner planets are visible while the Sun stays a dominant disc.
-const radiusScale = 2.4e-3;   // world-units per km (size amplification)
+const radiusScale = 2.5e-4;   // world-units per km (size amplification)
 const posScale    = 1.0;      // (kept for reference; distance compression applied via DIST below)
 const DIST = 25;              // world-units per AU — compresses orbital distances so the whole system is viewable
 
@@ -375,7 +375,7 @@ const byKey = {}; BODIES.forEach(b=>byKey[b.key]=b);
 // Precompute a per-body display radius in world units (amplified, Sun reduced).
 function displayRadius(b){
   let r = b.radius * radiusScale;
-  if(b.key==="sun") r *= 0.01;                 // keep Sun a manageable glowing disc
+  if(b.key==="sun") r *= 0.12;                 // keep Sun a manageable glowing disc
   b.renderR = r;
   return r;
 }
@@ -423,20 +423,31 @@ function project(P){
   const sy=Math.sin(cam.yaw), cosy=Math.cos(cam.yaw);
   const sp=Math.sin(cam.pitch), spy=Math.cos(cam.pitch);
   // rotate so camera sits at +dist on its forward axis looking toward target
-  const fx=-sy*spy, fy=sp, fz=-cosy*spy;      // forward (camera→target dir is -forward)
-  // Build orthonormal camera frame
-  let up=V(0,1,0);
-  let right=norm(cross(V(fx,fy,fz),up));
-  let trueUp=cross(right,V(fx,fy,fz));
-  // camera position along forward from target
-  const camPos=V(cam.target.x+fx*cam.dist, cam.target.y+fy*cam.dist, cam.target.z+fz*cam.dist);
+  const b=camBasis();
+  const fx=b.forward.x, fy=b.forward.y, fz=b.forward.z;
+  // camera sits behind target along the forward axis, looking toward it
+  const camPos=V(cam.target.x-fx*cam.dist, cam.target.y-fy*cam.dist, cam.target.z-fz*cam.dist);
   const rel=sub(P,camPos);
-  const zc=dot(rel,V(fx,fy,fz));      // depth in front (negative)
+  const zc=dot(rel,V(fx,fy,fz));      // positive depth when point is in front
   if(zc < 0.001) return null;
-  const xc=dot(rel,right), yc=dot(rel,trueUp);
+  const xc=dot(rel,b.right), yc=dot(rel,b.up);
   const f=1/Math.tan(cam.fov/2);
   const s=(aspectRef.h/2)/zc*f;
   return {x:aspectRef.w/2+xc*s, y:aspectRef.h/2-yc*s, zc, s, depth:zc};
+}
+// Build an orthonormal camera basis {forward, right, up}.
+// Robust against the degenerate case where forward is parallel to world-up
+// (looking straight up/down), which would make the cross product zero and
+// produce NaN that crashes createRadialGradient / the whole frame loop.
+function camBasis(){
+  const sy=Math.sin(cam.yaw), cosy=Math.cos(cam.yaw);
+  const sp=Math.sin(cam.pitch), spy=Math.cos(cam.pitch);
+  const fx=sy*spy, fy=-sp, fz=cosy*spy;          // forward (unit)
+  var hint=V(0,1,0);
+  if(Math.abs(-fy)>0.99) hint=V(0,0,1.0);         // looking nearly straight up/down
+  var right=norm(cross(V(fx,fy,fz),hint));        // unit
+  var trueUp=cross(right,V(fx,fy,fz));            // unit (orthonormal)
+  return {forward:V(fx,fy,fz), right:right, up:trueUp};
 }
 // world->camera depth (for painter sort)
 function camDepth(P){
@@ -517,28 +528,78 @@ function resize(){
 }
 window.addEventListener("resize",resize);
 
-// ---- starfield (static, blitted once) ----
-let starImg=null;
+// ---- starfield skybox (a 3D dome of stars surrounding the camera) ----
+// Stars live on directions (unit vectors) so the dome always surrounds the
+// camera no matter where it flies -> a real skybox, not a flat backdrop.
+let stars3D=null;
 function makeStars(n){
-  const off=document.createElement("canvas"); off.width=W; off.height=H;
-  const o=off.getContext("2d");
-  o.fillStyle="#05060a"; o.fillRect(0,0,W,H);
+  stars3D=new Array(n);
   for(let i=0;i<n;i++){
-    const x=Math.random()*W,y=Math.random()*H;
-    const r=Math.random()*1.4+0.2;
-    const a=Math.random()*0.7+0.3;
-    const tint=Math.random();
-    o.globalAlpha=a;
-    o.fillStyle = tint<0.7?"#ffffff":(tint<0.85?"#bcd8ff":"#ffe9c8");
-    o.beginPath(); o.arc(x,y,r,0,TWO_PI); o.fill();
-    if(r>1.1){o.globalAlpha=a*0.4;o.beginPath();o.arc(x,y,r*2.4,0,TWO_PI);o.fill();}
+    const u=Math.random()*2-1;                     // cos(theta) in [-1,1]
+    const th=Math.random()*TWO_PI;
+    const rt=Math.sqrt(Math.max(0,1-u*u));
+    stars3D[i]={
+      dx:rt*Math.cos(th), dy:u, dz:rt*Math.sin(th),
+      size:Math.random()*1.7+0.3,
+      a:Math.random()*0.6+0.4,
+      tint:Math.random()
+    };
   }
-  o.globalAlpha=1;
-  starImg=o.createImageData(W,H); // placeholder; we blit via imageBitmap alternative below
-  // Actually blit the offscreen canvas:
-  starCanvas=off;
 }
-let starCanvas=null;
+// project a star direction onto the current camera basis -> screen point (null if behind)
+function starScreen(st){
+  const b=camBasis();
+  const zx=st.dx*b.forward.x+st.dy*b.forward.y+st.dz*b.forward.z;
+  const xx=st.dx*b.right.x+st.dy*b.right.y+st.dz*b.right.z;
+  const yy=st.dx*b.up.x+st.dy*b.up.y+st.dz*b.up.z;
+  if(zx<=0) return null;                        // behind the camera
+  const f=1/Math.tan(cam.fov/2);
+  const s=(aspectRef.h/2)/zx*f;
+  return {x:aspectRef.w/2+xx*s, y:aspectRef.h/2-yy*s};
+}
+// faint nebula glow so deep space isn't flat black.
+// Nebula blobs live on sky directions so they rotate with the camera like the stars.
+// Each blob is a soft radial glow sized to a fraction of the screen.
+let nebula=null;
+function makeNebula(){
+  const S=Math.min(aspectRef.w,aspectRef.h)*0.42; // glow radius, ~42% of shortest edge
+  nebula=[
+    {dx:-0.72, dy:0.18, dz:-0.66, size:S, color:[70,45,120]},
+    {dx: 0.60, dy:0.34, dz:-0.73, size:S*1.08, color:[30,60,130]},
+    {dx: 0.20, dy:-0.55, dz:-0.81, size:S*0.9, color:[40,70,110]}
+  ];
+}
+function drawNebula(){
+  ctx.save();
+  for(let i=0;i<nebula.length;i++){
+    const nb=nebula[i];
+    const p=starScreen({dx:nb.dx,dy:nb.dy,dz:nb.dz}); if(!p) continue;
+    const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,nb.size);
+    const [r,gg,bb]=nb.color;
+    g.addColorStop(0,"rgba("+r+","+gg+","+bb+",0.10)");
+    g.addColorStop(0.6,"rgba("+r+","+gg+","+bb+",0.04)");
+    g.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle=g;
+    ctx.fillRect(p.x-nb.size,p.y-nb.size,nb.size*2,nb.size*2);
+  }
+  ctx.restore();
+}
+function drawStars(){
+  ctx.save();
+  ctx.globalCompositeOperation="lighter";
+  const now=performance.now();
+  for(let i=0;i<stars3D.length;i++){
+    const st=stars3D[i];
+    const p=starScreen(st); if(!p) continue;
+    const tw=0.7+0.3*Math.sin(now*0.004+st.dx*3.0);
+    const a=st.a*tw;
+    if(st.tint<0.7) ctx.fillStyle="rgba(255,255,255,"+a.toFixed(2)+")";
+    else if(st.tint<0.87) ctx.fillStyle="rgba(190,216,255,"+a.toFixed(2)+")";
+    else ctx.fillStyle="rgba(255,233,200,"+a.toFixed(2)+")";
+    ctx.beginPath(); ctx.arc(p.x,p.y,st.size,0,TWO_PI); ctx.fill();
+  }
+  ctx.restore();
+}
 
 // ---- lit sphere with optional bands ----
 function drawSphere(P,radiusKm,baseColor,bands,atmo,isSun){
@@ -553,12 +614,8 @@ function drawSphere(P,radiusKm,baseColor,bands,atmo,isSun){
   const lfz=-lightDir.x*Math.sin(cam.pitch)*Math.cos(cam.yaw)
            +lightDir.y*Math.cos(cam.pitch)
            -lightDir.z*Math.sin(cam.pitch)*Math.cos(cam.yaw);
-  // project light onto camera right/up
-  const lr=dot(lightDir,cross(V(cam.target.y-cam.target.y,cam.target.z-cam.target.z,cam.dist-cam.target.z),V(0,1,0)));
-  // simpler: transform light into camera basis
-  const camRight=norm(cross(V(-Math.sin(cam.pitch)*Math.cos(cam.yaw),-Math.sin(cam.pitch),-Math.cos(cam.pitch)*Math.cos(cam.yaw)),V(0,1,0)));
-  const camUp=norm(cross(camRight,V(-Math.sin(cam.yaw),Math.cos(cam.yaw),0)));
-  const lx=dot(lightDir,camRight), ly=dot(lightDir,camUp);
+  const b=camBasis();
+  const lx=dot(lightDir,b.right), ly=dot(lightDir,b.up);
 
   const sx=pr.x, sy=pr.y;
   // glow / atmosphere halo
@@ -1052,7 +1109,8 @@ function frame(now){
 
   // render
   ctx.clearRect(0,0,W,H);
-  if(starCanvas) ctx.drawImage(starCanvas,0,0,W,H);
+  drawNebula();
+  drawStars();
   // faint radial vignette
   const vg=ctx.createRadialGradient(W/2,H/2,H*0.3,W/2,H/2,H*0.9);
   vg.addColorStop(0,"rgba(0,0,0,0)");vg.addColorStop(1,"rgba(0,0,0,0.45)");
@@ -1086,12 +1144,14 @@ function frame(now){
   for(const dr of draws){
     if(dr.kind==="sun"){
       const spr=project(dr.pos);
+      if(!spr || isNaN(spr.x)||isNaN(spr.y)||!isFinite(spr.s)) continue;
       drawSun(spr);
       if(spr) drawLabel(dr.body, spr, spr.s*dr.body.renderR);
       continue;
     }
     if(dr.kind==="planet"){
       const pr=project(dr.pos);
+      if(!pr || isNaN(pr.x)||isNaN(pr.y)||!isFinite(pr.s)) continue;
       const info=drawSphere(dr.pos,dr.body.renderR,dr.body.color,dr.body.bands,null,false);
       if(VIEW.showRings && dr.body.ring){
         // draw back half of rings behind planet handled by sort; draw here for simplicity
@@ -1126,6 +1186,7 @@ function updateClock(){
 function boot(){
   resize();
   makeStars(1400);
+  makeNebula();
   initBelt();
   buildList();
   updateSpeed();
