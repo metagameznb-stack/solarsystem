@@ -376,7 +376,7 @@ const byKey = {}; BODIES.forEach(b=>byKey[b.key]=b);
 // Precompute a per-body display radius in world units (amplified, Sun reduced).
 function displayRadius(b){
   let r = b.radius * radiusScale;
-  if(b.key==="sun") r *= 0.4;                  // sun ~29x Jupiter (real ratio), keep visible without swallowing the system
+  if(b.key==="sun") r *= 0.04;                 // ~10x smaller than the 0.4 probe; stays a small bright disc without dominating
   b.renderR = r;
   return r;
 }
@@ -660,33 +660,52 @@ function hexToRgb(h){
   return {r:parseInt(h.substr(0,2),16),g:parseInt(h.substr(2,2),16),b:parseInt(h.substr(4,2),16)};
 }
 
-// ---- Saturn-style rings (particle ring) ----
-function drawRings(planet, planetPos, ring){
+// ---- Saturn-style rings, split back/front for correct occlusion ----
+// `half` selects which half of the ring to draw:
+//   "back" -> points farther from the camera than the planet centre (drawn FIRST)
+//   "front"-> points nearer (drawn OVER the planet disc)
+// Previously the whole ring was drawn in one pass after the planet, so the back
+// half painted on top of the disc and the rings looked like a flat band floating
+// in the wrong place instead of wrapping the planet.
+function drawRings(planet, planetPos, ring, half){
   if(!ring) return;
   const inner=ring.inner, outer=ring.outer;
   const n=200;
   const tilt=planet.tilt?planet.tilt*DEG:26*DEG;   // ring plane tilt (deg)
   const cT=Math.cos(tilt), sT=Math.sin(tilt);
   const renderR=planet.renderR;
+  const planetDepth=camDepth(planetPos);
   ctx.save();
   ctx.globalCompositeOperation="lighter";
   for(let k=0;k<n;k++){
     const ang=(k/n)*TWO_PI;
     const t=(k/n);                                   // radial position 0..1
     const R=(inner + (outer-inner)*t)*renderR;       // world-units radius
-    // ring point in the planet's local equatorial plane (x-y plane, tilt around x)
-    const lx=planetPos.x+Math.cos(ang)*R;
-    const ly=planetPos.y;
-    const lz=planetPos.z+Math.sin(ang)*R;
-    // tilt: rotate around the planet's local x-axis by `tilt`
-    const wy=ly*cT - lz*sT;
-    const wz=ly*sT + lz*cT;
-    const wp=project(V(lx, wy, wz));
+    // ring offset in the planet's local equatorial plane (x-z), THEN tilt.
+    // Tilt must rotate the offset around the planet's centre, not the absolute
+    // world position: rotating planetPos.x/z directly bakes planetPos.z*sin(tilt)
+    // into every point, shifting the whole ring far away from the planet when it
+    // is far from the camera (the "rings in the wrong spot" bug).
+    const ox=Math.cos(ang)*R;
+    const oz=Math.sin(ang)*R;
+    // rotate (ox, 0, oz) about the local x-axis by `tilt`
+    const lx=ox;
+    const ly=-oz*sT;
+    const lz=oz*cT;
+    // world position = planet centre + tilted local offset
+    const wx=planetPos.x+lx;
+    const wy=planetPos.y+ly;
+    const wz=planetPos.z+lz;
+    const wp=project(V(wx, wy, wz));
     if(!wp)continue;
+    // depth-based split: ring point farther from the camera than the planet
+    // centre = back half (drawn first), nearer = front half (drawn over disc).
+    const behind = camDepth(V(wx, wy, wz)) > planetDepth;
+    if((half==="back"&&!behind)||(half==="front"&&behind)) continue;
     // colour sampled from the ring's gradient stops, blended smoothly
     const col=ringColor(ring,t);
-    ctx.fillStyle=col;
     const radius=Math.max(0.4, wp.s*(outer-inner)*renderR*0.055);
+    ctx.fillStyle=col;
     ctx.beginPath();ctx.arc(wp.x,wp.y,radius,0,TWO_PI);ctx.fill();
   }
   ctx.restore();
@@ -1153,10 +1172,13 @@ function frame(now){
     if(dr.kind==="planet"){
       const pr=project(dr.pos);
       if(!pr || isNaN(pr.x)||isNaN(pr.y)||!isFinite(pr.s)) continue;
+      // back ring half first (behind the disc), then planet, then front half
+      if(VIEW.showRings && dr.body.ring){
+        drawRings(dr.body,dr.pos,dr.body.ring,"back");
+      }
       const info=drawSphere(dr.pos,dr.body.renderR,dr.body.color,dr.body.bands,null,false);
       if(VIEW.showRings && dr.body.ring){
-        // draw back half of rings behind planet handled by sort; draw here for simplicity
-        drawRings(dr.body,dr.pos,dr.body.ring);
+        drawRings(dr.body,dr.pos,dr.body.ring,"front");
       }
       drawLabel(dr.body,pr,info.scr);
     }
